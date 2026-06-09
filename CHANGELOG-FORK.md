@@ -23,6 +23,13 @@
 
 ### [未发布] stable
 
-- `docs`: 添加 fork 维护计划(`IMPLEMENTATION_PLAN.md`)与本说明
-- _(进行中)_ `security`: 修复 untracked 文件 symlink 跟随导致的潜在凭据泄露(`lib/git.mjs`)
-- _(进行中)_ 合入卡死/无响应修复 #302 #312 #300(Opus + Codex 双审通过后)
+**已合入**(均经 Opus + Codex 双重安全审计:9 条红线全清、0 安全发现):
+
+- `docs`: 添加 fork 维护计划(`IMPLEMENTATION_PLAN.md`)与本说明 — `71e17e8`
+- `security`: 修复 untracked 文件 symlink 逃逸导致的凭据泄露(`lib/git.mjs`,`realpathSync` 限定 workspace 内)— `487b54d`,边界测试/TOCTOU 标注 `138958e`。Opus 设计+验证,Codex 独立复审 NEEDS_DISCUSSION(**无安全阻断**;TOCTOU 残余需本机并发执行能力、在威胁模型外,已诚实标注)
+- #300 `fix`: broker shutdown 加 wall-clock timeout,broker 接受连接却不回复时不再无限挂 — `357893b`
+- #302 `feat`: JSON-RPC `request()` 加 per-request wall-clock timeout + turn idle timeout,根治「卡死/无响应」主根因(request 永久 pending)— `18d3ee9`
+
+**暂缓 / 不合入**:
+
+- #312(per-turn watchdog):**HOLD**。Codex 在 Node v24.10.0 **复现** HIGH 正确性缺陷——watchdog 打不断卡住的 `startRequest()`,timer reject 一个无人 await 的 promise 导致 unhandledRejection / exit 1(而非 PR 承诺的 exit 124),且新测试只覆盖错误对象形状、未测真实 timeout 行为。安全无虞(9 红线全清),但功能不达标;且 #302 的 request 层 timeout 已更根本地覆盖该场景(任何 RPC hang 都会被 reject),故暂不合入。如需补,要重写 watchdog 使其能中断 `startRequest`(如 `Promise.race`)。
