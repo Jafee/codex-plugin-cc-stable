@@ -293,10 +293,15 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       this.readline.close();
     }
 
-    if (this.proc && !this.proc.killed) {
+    // Gate on the true "still running" check, NOT `!this.proc.killed`: Node sets
+    // `killed` once a signal has merely been *sent*, so gating the whole kill
+    // block (including the SIGKILL escalation) on `!killed` would wrongly skip it
+    // if a SIGTERM was already delivered-and-ignored before close() — leaving a
+    // wedged child to hang the host. (Reviewer, final cross-audit.)
+    if (this.proc && this.proc.exitCode === null && this.proc.signalCode === null) {
       this.proc.stdin.end();
       setTimeout(() => {
-        if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
+        if (this.proc && this.proc.exitCode === null && this.proc.signalCode === null) {
           // On Windows with shell: true, the direct child is cmd.exe.
           // Use terminateProcessTree to kill the entire tree including
           // the grandchild node process.
@@ -398,6 +403,11 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
     this.closed = true;
     if (this.socket) {
       this.socket.end();
+      // Destroy too: end() only half-closes, so a peer that accepts but never
+      // sends FIN (e.g. a rogue or wedged endpoint) would otherwise leave this
+      // socket ref'd and its exitPromise unresolved, keeping the host process
+      // alive even after a bounded connect() failure. (Final cross-audit.)
+      this.socket.destroy();
     }
     await this.exitPromise;
   }

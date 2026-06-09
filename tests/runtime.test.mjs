@@ -2586,3 +2586,48 @@ test("broker shutdown is bounded even if a connected client never closes its soc
 
   assert.equal(exitCode, 0);
 });
+
+test("connect() to a broker endpoint that accepts but never responds still lets the host exit", async (t) => {
+  // A rogue/wedged broker endpoint accepts the connection but never answers the
+  // initialize RPC and never closes. BrokerClient.close() must destroy the socket
+  // so connect()'s bounded failure cleanup leaves no ref'd handle keeping the host
+  // process alive. (Final cross-audit: broker-client close destroy.)
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  const sessionDir = makeTempDir();
+  const sockPath = path.join(sessionDir, "rogue-broker.sock");
+
+  const rogue = net.createServer(() => {
+    // Accept and do nothing — never respond, never close.
+  });
+  await new Promise((resolve, reject) => {
+    rogue.once("error", reject);
+    rogue.listen(sockPath, resolve);
+  });
+  t.after(() => new Promise((resolve) => rogue.close(resolve)));
+
+  const appServerUrl = pathToFileURL(path.join(PLUGIN_ROOT, "scripts", "lib", "app-server.mjs")).href;
+  const script = [
+    `import { CodexAppServerClient } from ${JSON.stringify(appServerUrl)};`,
+    "try {",
+    `  await CodexAppServerClient.connect(process.cwd(), { brokerEndpoint: ${JSON.stringify(`unix:${sockPath}`)} });`,
+    "  process.exit(2);",
+    "} catch {",
+    "  // Natural exit: a ref'd broker socket would otherwise hang the event loop.",
+    "  process.exitCode = 7;",
+    "}"
+  ].join("\n");
+
+  const startedAt = Date.now();
+  const result = run("node", ["--input-type=module", "-e", script], {
+    cwd: repo,
+    env: { ...buildEnv(makeTempDir()), CODEX_APP_SERVER_RPC_TIMEOUT_MS: "500" },
+    timeout: 15000
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  // connect() must reject (initialize RPC timed out) AND the host must exit
+  // naturally — not hang on a ref'd broker socket until the spawnSync timeout.
+  assert.equal(result.status, 7, `host should exit despite a non-responsive broker; got ${result.status}: ${result.stderr}`);
+  assert.ok(elapsedMs < 10000, `host exit must not block on a ref'd broker socket; took ${elapsedMs}ms`);
+});
