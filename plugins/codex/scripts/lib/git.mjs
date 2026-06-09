@@ -195,9 +195,27 @@ function formatSection(title, body) {
 
 function formatUntrackedFile(cwd, relativePath) {
   const absolutePath = path.join(cwd, relativePath);
+
+  // 安全:解析符号链接后的真实路径,拒绝逃逸出 workspace 的 untracked 软链。
+  // 否则恶意仓库可放一个 untracked symlink(例如指向 ~/.ssh/id_rsa、~/.codex/auth.json、.env),
+  // 在 /codex:review 工作树审查时把工作区外的敏感文件内容读进 review 上下文并发送给 Codex。
+  // realpathSync 会解析整条路径(含中间目录软链),broken symlink 会抛错并走下方 skip。
+  let realRoot;
+  let realPath;
+  try {
+    realRoot = fs.realpathSync(cwd);
+    realPath = fs.realpathSync(absolutePath);
+  } catch {
+    return `### ${relativePath}\n(skipped: broken symlink or unreadable file)`;
+  }
+  const relativeToRoot = path.relative(realRoot, realPath);
+  if (relativeToRoot === ".." || relativeToRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToRoot)) {
+    return `### ${relativePath}\n(skipped: symlink escapes workspace)`;
+  }
+
   let stat;
   try {
-    stat = fs.statSync(absolutePath);
+    stat = fs.statSync(realPath);
   } catch {
     return `### ${relativePath}\n(skipped: broken symlink or unreadable file)`;
   }
@@ -210,7 +228,7 @@ function formatUntrackedFile(cwd, relativePath) {
 
   let buffer;
   try {
-    buffer = fs.readFileSync(absolutePath);
+    buffer = fs.readFileSync(realPath);
   } catch {
     return `### ${relativePath}\n(skipped: broken symlink or unreadable file)`;
   }

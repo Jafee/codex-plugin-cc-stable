@@ -181,3 +181,46 @@ test("collectReviewContext keeps untracked file content in lightweight working t
   assert.match(context.content, /## Untracked Files/);
   assert.match(context.content, /UNTRACKED_RISK_MARKER/);
 });
+
+test("collectReviewContext does not follow untracked symlinks that escape the workspace", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+
+  // workspace 外的敏感文件(模拟 ~/.ssh/id_rsa、~/.codex/auth.json、.env)
+  const outsideDir = makeTempDir();
+  const secretFile = path.join(outsideDir, "secret.txt");
+  fs.writeFileSync(secretFile, "TOP_SECRET_PRIVATE_KEY_MATERIAL\n");
+
+  // 恶意 untracked symlink,指向 workspace 外的敏感文件
+  fs.symlinkSync(secretFile, path.join(cwd, "innocent-notes.txt"));
+
+  const target = resolveReviewTarget(cwd, {});
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "working-tree");
+  // 敏感内容绝不能出现在发送给 Codex 的 review 上下文里
+  assert.doesNotMatch(context.content, /TOP_SECRET_PRIVATE_KEY_MATERIAL/);
+  assert.match(context.content, /### innocent-notes\.txt/);
+  assert.match(context.content, /skipped: symlink escapes workspace/);
+});
+
+test("collectReviewContext still reads untracked symlinks that resolve inside the workspace", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+
+  // workspace 内的真实文件 + 指向它的 workspace 内 symlink(合法场景,不应误杀)
+  fs.writeFileSync(path.join(cwd, "real-note.txt"), "INSIDE_WORKSPACE_CONTENT\n");
+  fs.symlinkSync(path.join(cwd, "real-note.txt"), path.join(cwd, "link-note.txt"));
+
+  const target = resolveReviewTarget(cwd, {});
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "working-tree");
+  assert.match(context.content, /INSIDE_WORKSPACE_CONTENT/);
+});
