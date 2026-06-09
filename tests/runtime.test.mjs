@@ -3,6 +3,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import net from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
@@ -2507,4 +2508,81 @@ test("connect() lets the host exit even when an app-server descendant inherits i
   assert.ok(grandchildPid, "fake should record a lingering grandchild pid");
   assert.equal(result.status, 7, `host should exit despite a leaky descendant; got ${result.status}: ${result.stderr}`);
   assert.ok(elapsedMs < 10000, `host exit must not block on inherited fds; took ${elapsedMs}ms`);
+});
+
+test("broker shutdown is bounded even if a connected client never closes its socket", async (t) => {
+  // server.close() only resolves once every connection has fully closed. A
+  // half-open straggler (one that never reciprocates the broker's socket.end())
+  // would otherwise block teardown — and the upstream close + process exit —
+  // forever. The bounded drain must force it shut.
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+
+  const broker = path.join(PLUGIN_ROOT, "scripts", "app-server-broker.mjs");
+  const sessionDir = makeTempDir();
+  const sockPath = path.join(sessionDir, "broker.sock");
+  const child = spawn(
+    "node",
+    [broker, "serve", "--endpoint", `unix:${sockPath}`, "--cwd", repo, "--pid-file", path.join(sessionDir, "broker.pid")],
+    {
+      // High idle so a broker exit can only be the requested shutdown, not idle.
+      env: { ...buildEnv(binDir), CODEX_COMPANION_BROKER_IDLE_MS: "60000" },
+      stdio: "ignore"
+    }
+  );
+  t.after(() => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  });
+
+  await waitFor(() => fs.existsSync(sockPath), { timeoutMs: 5000, intervalMs: 50 });
+
+  // A straggler holding a half-open connection: allowHalfOpen means it does NOT
+  // auto-close when the broker ends its side, so server.close() would hang.
+  const straggler = net.connect({ path: sockPath, allowHalfOpen: true });
+  await new Promise((resolve, reject) => {
+    straggler.once("connect", resolve);
+    straggler.once("error", reject);
+  });
+  t.after(() => {
+    try {
+      straggler.destroy();
+    } catch {
+      // Already gone.
+    }
+  });
+
+  // A second client asks the broker to shut down. shutdown() must complete and
+  // the broker must exit despite the half-open straggler still being connected.
+  const requester = net.connect({ path: sockPath });
+  await new Promise((resolve, reject) => {
+    requester.once("connect", resolve);
+    requester.once("error", reject);
+  });
+  t.after(() => {
+    try {
+      requester.destroy();
+    } catch {
+      // Already gone.
+    }
+  });
+  requester.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
+
+  const exitCode = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("broker shutdown hung on the half-open straggler"));
+    }, 8000);
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+  });
+
+  assert.equal(exitCode, 0);
 });

@@ -11,6 +11,12 @@ import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 
+// Grace before shutdown() force-destroys any still-connected client. `server.close()`
+// only resolves once EVERY connection has fully closed, so a wedged or half-open
+// client (one that never reciprocates our socket.end()) would otherwise block the
+// upstream app-server close and process exit forever.
+const SHUTDOWN_DRAIN_MS = 1_000;
+
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
   if (params?.threadId) {
@@ -87,13 +93,13 @@ async function main() {
     if (idleTimer) {
       clearTimeout(idleTimer);
     }
-    idleTimer = setTimeout(async () => {
+    idleTimer = setTimeout(() => {
       if (sockets.size > 0 || activeRequestSocket || activeStreamSocket) {
         armIdle();
         return;
       }
-      await shutdown(server);
-      process.exit(0);
+      // .finally (like onSocketGone) guarantees exit even if shutdown() rejects.
+      shutdown(server).finally(() => process.exit(0));
     }, IDLE_MS);
     idleTimer.unref?.();
   }
@@ -158,7 +164,27 @@ async function main() {
     // still-open appClient (during drain) or refused with ECONNREFUSED — which
     // the companion retries into a fresh broker — rather than accepted and then
     // failed against a closed app-server (an error withAppServer does not retry).
-    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve();
+      };
+      server.close(finish);
+      // server.close() waits for every connection to fully close; a wedged or
+      // half-open client would block teardown forever. Force-destroy any
+      // straggler after a short grace so shutdown is always bounded.
+      const timer = setTimeout(() => {
+        for (const socket of sockets) {
+          socket.destroy();
+        }
+        finish();
+      }, SHUTDOWN_DRAIN_MS);
+      timer.unref?.();
+    });
     await appClient.close().catch(() => {});
     if (listenTarget.kind === "unix" && fs.existsSync(listenTarget.path)) {
       fs.unlinkSync(listenTarget.path);
