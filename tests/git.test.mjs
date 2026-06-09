@@ -224,3 +224,46 @@ test("collectReviewContext still reads untracked symlinks that resolve inside th
   assert.equal(target.mode, "working-tree");
   assert.match(context.content, /INSIDE_WORKSPACE_CONTENT/);
 });
+
+test("collectReviewContext rejects untracked symlinks into a sibling dir sharing a name prefix", () => {
+  // 边界:cwd=/.../repo,目标在 /.../repo-evil。path.relative 必须判为逃逸,
+  // 不能因 "repo-evil" 以 "repo" 开头而误判为在 workspace 内。
+  const parent = makeTempDir();
+  const cwd = path.join(parent, "repo");
+  const sibling = path.join(parent, "repo-evil");
+  fs.mkdirSync(cwd);
+  fs.mkdirSync(sibling);
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+
+  fs.writeFileSync(path.join(sibling, "secret.txt"), "SIBLING_PREFIX_SECRET\n");
+  fs.symlinkSync(path.join(sibling, "secret.txt"), path.join(cwd, "notes.txt"));
+
+  const target = resolveReviewTarget(cwd, {});
+  const context = collectReviewContext(cwd, target);
+
+  assert.doesNotMatch(context.content, /SIBLING_PREFIX_SECRET/);
+  assert.match(context.content, /skipped: symlink escapes workspace/);
+});
+
+test("collectReviewContext reads normal untracked files when the workspace path is itself a symlink", () => {
+  // 边界:cwd 本身是 symlink(类比 macOS /var -> /private/var)。realRoot 经 realpathSync
+  // 解析后应与文件 realpath 同根,正常文件不应被误杀。
+  const real = makeTempDir();
+  const linkParent = makeTempDir();
+  const cwd = path.join(linkParent, "linked-repo");
+  fs.symlinkSync(real, cwd);
+
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  fs.writeFileSync(path.join(cwd, "untracked-note.txt"), "WORKSPACE_VIA_SYMLINK_OK\n");
+
+  const target = resolveReviewTarget(cwd, {});
+  const context = collectReviewContext(cwd, target);
+
+  assert.match(context.content, /WORKSPACE_VIA_SYMLINK_OK/);
+});

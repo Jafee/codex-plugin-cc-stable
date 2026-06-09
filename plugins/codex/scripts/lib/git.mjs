@@ -200,6 +200,10 @@ function formatUntrackedFile(cwd, relativePath) {
   // 否则恶意仓库可放一个 untracked symlink(例如指向 ~/.ssh/id_rsa、~/.codex/auth.json、.env),
   // 在 /codex:review 工作树审查时把工作区外的敏感文件内容读进 review 上下文并发送给 Codex。
   // realpathSync 会解析整条路径(含中间目录软链),broken symlink 会抛错并走下方 skip。
+  // 已知边界:这是路径级(非 fd 级)校验,realpath 与随后的 read 之间存在 TOCTOU 窗口。
+  // 对本工具的威胁模型(review 一个静态的恶意仓库)已足够——repo 里预置的逃逸 symlink 会被拒。
+  // 完全封死"主动并发把目标替换成 symlink"需基于 fd 的 O_NOFOLLOW 打开,但那要求攻击者已具备
+  // 本机并发执行能力(彼时系统已被攻陷、可直接读取密钥),本泄露不再是关键路径,故不引入额外复杂度。
   let realRoot;
   let realPath;
   try {
