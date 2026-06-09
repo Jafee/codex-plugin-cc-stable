@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { parseArgs } from "./lib/args.mjs";
-import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
+import { BROKER_BUSY_RPC_CODE, CodexAppServerClient, resolveTimeoutMs } from "./lib/app-server.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
@@ -81,7 +81,7 @@ async function main() {
   // accumulate as orphaned processes. Exit after IDLE_MS with no connected
   // clients so the leak self-heals; the companion transparently respawns one on
   // the next task. Env-overridable for long idle gaps.
-  const IDLE_MS = Number(process.env.CODEX_COMPANION_BROKER_IDLE_MS) || 1_800_000;
+  const IDLE_MS = resolveTimeoutMs("CODEX_COMPANION_BROKER_IDLE_MS", 1_800_000);
   let idleTimer = null;
   function armIdle() {
     if (idleTimer) {

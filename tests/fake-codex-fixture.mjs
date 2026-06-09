@@ -256,7 +256,33 @@ if (args[0] !== "app-server") {
 }
 const bootState = loadState();
 bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
+bootState.appServerPid = process.pid;
 saveState(bootState);
+
+if (BEHAVIOR === "init-rejects" || BEHAVIOR === "init-rejects-unkillable" || BEHAVIOR === "init-rejects-leaky-child") {
+  // Stay alive even after stdin closes so the only thing that can end this fake
+  // app-server is an explicit signal from the client's cleanup close(). This
+  // lets the "connect cleans up on initialize failure" test detect an orphan.
+  setInterval(() => {}, 1 << 30);
+  if (BEHAVIOR === "init-rejects-unkillable") {
+    // Ignore SIGTERM so close()'s graceful kill cannot reap us; exercises
+    // connect()'s BOUNDED cleanup (it must still fail fast, not hang).
+    process.on("SIGTERM", () => {});
+  }
+  if (BEHAVIOR === "init-rejects-leaky-child") {
+    // Spawn a detached grandchild that inherits our stdout/stderr and lingers,
+    // so reaping THIS process alone does not close the client's read pipes.
+    // Exercises close()'s stdio teardown: the host process must still exit.
+    const child_process = require("node:child_process");
+    const grandchild = child_process.spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+      stdio: ["ignore", "inherit", "inherit"],
+      detached: true
+    });
+    grandchild.unref();
+    bootState.grandchildPid = grandchild.pid;
+    saveState(bootState);
+  }
+}
 
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
@@ -270,6 +296,14 @@ rl.on("line", (line) => {
   try {
     switch (message.method) {
       case "initialize":
+        if (BEHAVIOR === "init-rejects" || BEHAVIOR === "init-rejects-unkillable" || BEHAVIOR === "init-rejects-leaky-child") {
+          // Fail the initialize RPC right after boot recorded our pid. This
+          // exercises connect()'s catch-and-close cleanup of the spawned
+          // app-server with a causal ordering (boot -> reply -> reject -> close),
+          // so the orphan check never races a wall-clock timeout.
+          send({ id: message.id, error: { code: -32000, message: "fake initialize failure" } });
+          break;
+        }
         state.capabilities = message.params.capabilities || null;
         saveState(state);
         send({ id: message.id, result: { userAgent: "fake-codex-app-server" } });

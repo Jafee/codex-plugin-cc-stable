@@ -23,17 +23,38 @@ export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
 
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;
+// Node's timers overflow for delays above 2^31-1 ms (~24.8 days) and silently
+// fire them after ~1ms instead. Clamp every env-derived timeout to this ceiling
+// so an over-large value can't turn a long timeout into an immediate one.
+const MAX_TIMER_MS = 2_147_483_647;
+// Upper bound on connect()'s post-failure cleanup so a hung close() (a wedged
+// app-server ignoring SIGTERM, or a broker client that threw before it created a
+// socket to await) can never turn a fast failure into an unbounded hang.
+const CLEANUP_TIMEOUT_MS = 2_000;
 
-function resolveRpcTimeoutMs() {
-  const raw = process.env.CODEX_APP_SERVER_RPC_TIMEOUT_MS;
+/**
+ * Parse a millisecond timeout from an environment variable. Falls back to
+ * `defaultMs` for anything non-finite or negative, and clamps huge values to the
+ * Node timer ceiling. Unless `allowDisable` is set, an explicit 0 also maps to
+ * the default so an unconditional timer is never armed with a 0/immediate delay;
+ * with `allowDisable`, 0 is preserved for callers that treat it as "disabled".
+ * @param {string} envName
+ * @param {number} defaultMs
+ * @param {{ allowDisable?: boolean }} [options]
+ */
+export function resolveTimeoutMs(envName, defaultMs, { allowDisable = false } = {}) {
+  const raw = process.env[envName];
   if (raw === undefined || raw === "") {
-    return DEFAULT_RPC_TIMEOUT_MS;
+    return defaultMs;
   }
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    return DEFAULT_RPC_TIMEOUT_MS;
+    return defaultMs;
   }
-  return parsed;
+  if (parsed === 0) {
+    return allowDisable ? 0 : defaultMs;
+  }
+  return Math.min(parsed, MAX_TIMER_MS);
 }
 
 /** @type {ClientInfo} */
@@ -105,7 +126,9 @@ class AppServerClientBase {
     this.nextId += 1;
 
     return new Promise((resolve, reject) => {
-      const timeoutMs = resolveRpcTimeoutMs();
+      const timeoutMs = resolveTimeoutMs("CODEX_APP_SERVER_RPC_TIMEOUT_MS", DEFAULT_RPC_TIMEOUT_MS, {
+        allowDisable: true
+      });
       let timer = null;
       const wrappedResolve = (value) => {
         if (timer) clearTimeout(timer);
@@ -289,9 +312,37 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
           }
         }
       }, 50).unref?.();
+      // If SIGTERM did not land — a wedged app-server (the kind that made
+      // initialize time out) can ignore it — escalate to an uncatchable kill so
+      // its still-open stdio pipes cannot keep this process alive after a failed
+      // connect or teardown. Without this, connect()'s caller can reject yet the
+      // host process still never exits. (Reviewer P2, round 2.)
+      setTimeout(() => {
+        // Do NOT gate on `!this.proc.killed`: Node sets `killed` once any signal
+        // has been *sent* (the SIGTERM above), even if the process ignored it.
+        // `exitCode === null && signalCode === null` is the real "still running"
+        // check (a SIGTERM-terminated proc has exitCode null but signalCode set).
+        if (this.proc && this.proc.exitCode === null && this.proc.signalCode === null) {
+          try {
+            if (process.platform === "win32") {
+              terminateProcessTree(this.proc.pid);
+            } else {
+              this.proc.kill("SIGKILL");
+            }
+          } catch {
+            // Best-effort cleanup inside an unref'd timer.
+          }
+        }
+      }, 1000).unref?.();
     }
 
     await this.exitPromise;
+    // The child has exited, but a descendant that inherited its stdout/stderr can
+    // still hold the pipe write ends and keep our read streams — and thus this
+    // process's event loop — alive. Destroy our ends so the host can exit even
+    // when a grandchild lingers. (Reviewer P2, round 3.)
+    this.proc?.stdout?.destroy();
+    this.proc?.stderr?.destroy();
   }
 
   sendMessage(message) {
@@ -377,7 +428,28 @@ export class CodexAppServerClient {
     const client = brokerEndpoint
       ? new BrokerCodexAppServerClient(cwd, { ...options, brokerEndpoint })
       : new SpawnedCodexAppServerClient(cwd, options);
-    await client.initialize();
+    try {
+      await client.initialize();
+    } catch (error) {
+      // initialize() may already have spawned the direct app-server (or opened
+      // the broker socket) before failing — e.g. the initialize RPC hit its
+      // wall-clock timeout. The caller never receives `client`, so close it here
+      // or the spawned process/socket is orphaned. (Reviewer P2.)
+      //
+      // But close() awaits process/socket teardown and can itself hang: the
+      // wedged app-server that made initialize time out may also ignore SIGTERM,
+      // and a broker client that threw before creating its socket has no exit
+      // event to ever resolve exitPromise. Bound the cleanup so a fast failure
+      // can never become a hang, and rethrow the original error regardless.
+      await Promise.race([
+        client.close().catch(() => {}),
+        new Promise((resolve) => {
+          const timer = setTimeout(resolve, CLEANUP_TIMEOUT_MS);
+          timer.unref?.();
+        })
+      ]);
+      throw error;
+    }
     return client;
   }
 }

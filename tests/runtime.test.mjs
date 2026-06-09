@@ -3,7 +3,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
@@ -2345,4 +2345,166 @@ test("broker self-terminates when a client abandons an in-flight start (pre-ACK)
       return true;
     }
   }, { timeoutMs: 8000, intervalMs: 100 });
+});
+
+test("connect() cleans up the spawned app-server when the initialize RPC fails (no orphan)", async (t) => {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "init-rejects");
+  const repo = makeTempDir();
+  initGitRepo(repo);
+
+  // Run connect() in a child so the fake codex resolves on PATH; disableBroker
+  // forces the direct SpawnedCodexAppServerClient path (the one that spawns a
+  // codex app-server process). The fake fails the `initialize` RPC right after
+  // recording its pid, so connect() must reject — and must clean up the proc it
+  // spawned. (Causal boot -> reply -> reject -> close ordering, no timeout race.)
+  const appServerUrl = pathToFileURL(path.join(PLUGIN_ROOT, "scripts", "lib", "app-server.mjs")).href;
+  const script = [
+    `import { CodexAppServerClient } from ${JSON.stringify(appServerUrl)};`,
+    "try {",
+    "  await CodexAppServerClient.connect(process.cwd(), { disableBroker: true });",
+    "  process.exit(2);",
+    "} catch {",
+    "  // Mirror the real CLI: set exitCode and let Node exit naturally when the",
+    "  // event loop drains. If cleanup left an un-reaped child, its open stdio",
+    "  // pipes keep this process alive and the spawnSync timeout trips instead.",
+    "  process.exitCode = 7;",
+    "}"
+  ].join("\n");
+
+  const result = run("node", ["--input-type=module", "-e", script], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    timeout: 30000
+  });
+
+  // connect() must reject (not hang, not resolve) when the initialize RPC fails.
+  assert.equal(result.status, 7, `connect should reject on initialize failure; got ${result.status}: ${result.stderr}`);
+
+  const state = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  const appServerPid = state.appServerPid;
+  // Reap the fake if the cleanup regressed (it is kept alive against stdin EOF).
+  t.after(() => {
+    if (appServerPid) {
+      try {
+        process.kill(appServerPid, "SIGKILL");
+      } catch {
+        // Already gone — the expected outcome.
+      }
+    }
+  });
+
+  // The fake recorded its pid at boot and stays alive through stdin EOF, so the
+  // only thing that can have ended it is connect()'s cleanup close(). Without
+  // that cleanup the spawned app-server is orphaned and this assertion times out.
+  assert.ok(appServerPid, "fake app-server should record its pid at boot");
+  await waitFor(() => {
+    try {
+      process.kill(appServerPid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }, { timeoutMs: 6000, intervalMs: 50 });
+});
+
+test("connect() fails fast (bounded) even when the spawned app-server ignores SIGTERM", async (t) => {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "init-rejects-unkillable");
+  const repo = makeTempDir();
+  initGitRepo(repo);
+
+  const appServerUrl = pathToFileURL(path.join(PLUGIN_ROOT, "scripts", "lib", "app-server.mjs")).href;
+  const script = [
+    `import { CodexAppServerClient } from ${JSON.stringify(appServerUrl)};`,
+    "try {",
+    "  await CodexAppServerClient.connect(process.cwd(), { disableBroker: true });",
+    "  process.exit(2);",
+    "} catch {",
+    "  // Mirror the real CLI: set exitCode and let Node exit naturally when the",
+    "  // event loop drains. If cleanup left an un-reaped child, its open stdio",
+    "  // pipes keep this process alive and the spawnSync timeout trips instead.",
+    "  process.exitCode = 7;",
+    "}"
+  ].join("\n");
+
+  // The fake rejects initialize AND ignores SIGTERM, so connect()'s cleanup
+  // close() would hang forever on exitPromise without the bounded race. The 15s
+  // spawnSync timeout means an unbounded regression fails this test cleanly
+  // (status becomes null) instead of blocking the test runner.
+  const startedAt = Date.now();
+  const result = run("node", ["--input-type=module", "-e", script], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    timeout: 15000
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  const state = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  const appServerPid = state.appServerPid;
+  // The fake ignores SIGTERM, so reap it with SIGKILL regardless of outcome.
+  t.after(() => {
+    if (appServerPid) {
+      try {
+        process.kill(appServerPid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+
+  // connect() must reject (exit 7), bounded by CLEANUP_TIMEOUT_MS (~2s) — not
+  // hang until the 15s spawnSync timeout kills it (which would leave status null).
+  assert.equal(result.status, 7, `connect should fail fast even when cleanup cannot reap the proc; got ${result.status}: ${result.stderr}`);
+  assert.ok(elapsedMs < 10000, `connect cleanup must stay bounded; took ${elapsedMs}ms`);
+});
+
+test("connect() lets the host exit even when an app-server descendant inherits its stdio", async (t) => {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "init-rejects-leaky-child");
+  const repo = makeTempDir();
+  initGitRepo(repo);
+
+  const appServerUrl = pathToFileURL(path.join(PLUGIN_ROOT, "scripts", "lib", "app-server.mjs")).href;
+  const script = [
+    `import { CodexAppServerClient } from ${JSON.stringify(appServerUrl)};`,
+    "try {",
+    "  await CodexAppServerClient.connect(process.cwd(), { disableBroker: true });",
+    "  process.exit(2);",
+    "} catch {",
+    "  // Natural exit (as the real CLI does): a descendant holding the inherited",
+    "  // stdout/stderr fds keeps this process alive unless close() detaches our",
+    "  // ends of those pipes.",
+    "  process.exitCode = 7;",
+    "}"
+  ].join("\n");
+
+  const startedAt = Date.now();
+  const result = run("node", ["--input-type=module", "-e", script], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    timeout: 15000
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  const state = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  const { appServerPid, grandchildPid } = state;
+  // The grandchild ignores nothing — just reap both with SIGKILL afterward.
+  t.after(() => {
+    for (const pid of [appServerPid, grandchildPid]) {
+      if (pid) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+  });
+
+  // The grandchild inherits the app-server's stdout/stderr and lingers, so the
+  // host can only exit if close() destroyed our read ends of those pipes.
+  assert.ok(grandchildPid, "fake should record a lingering grandchild pid");
+  assert.equal(result.status, 7, `host should exit despite a leaky descendant; got ${result.status}: ${result.stderr}`);
+  assert.ok(elapsedMs < 10000, `host exit must not block on inherited fds; took ${elapsedMs}ms`);
 });

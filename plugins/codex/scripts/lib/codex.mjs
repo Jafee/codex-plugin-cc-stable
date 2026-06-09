@@ -35,7 +35,7 @@
  * }} TurnCaptureState
  */
 import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
+import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient, resolveTimeoutMs } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
 
@@ -585,8 +585,8 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   //   - CEILING_MS: absolute backstop on a single turn.
   //   - exit:       app-server process death rejects immediately.
   // Both timeouts are env-overridable for genuinely long turns.
-  const CEILING_MS = Number(process.env.CODEX_COMPANION_TURN_TIMEOUT_MS) || 1_800_000;
-  const STALL_MS = Number(process.env.CODEX_COMPANION_TURN_STALL_MS) || 600_000;
+  const CEILING_MS = resolveTimeoutMs("CODEX_COMPANION_TURN_TIMEOUT_MS", 1_800_000);
+  const STALL_MS = resolveTimeoutMs("CODEX_COMPANION_TURN_STALL_MS", 600_000);
   let lastActivity = Date.now();
   let ceilingTimer = null;
   let stallTimer = null;
