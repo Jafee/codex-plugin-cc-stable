@@ -67,7 +67,7 @@ GitHub **不允许**把 public repo 的 fork 设为 private。私有自用要用
 - 建 `stable` 工作分支(基于当前 `807e03a` / v1.0.4)
 - `NOTICE` 或新建 `CHANGELOG-FORK.md` 标注:本 fork 基于 `openai/codex-plugin-cc @807e03a`,Apache-2.0 合规(保留 LICENSE/NOTICE)
 **Tests**: `npm test`(现有 `tests/*.test.mjs` 全绿);`npm run build` 成功
-**Status**: Not Started
+**Status**: Complete(2026-06-07;origin=Jafee/codex-plugin-cc-stable,基线 807e03a)
 
 ## Stage 2: 主动修 symlink 漏洞(不依赖任何 PR)
 **Goal**: `lib/git.mjs` 不再跟随指向 cwd 外的 symlink
@@ -78,7 +78,7 @@ GitHub **不允许**把 public repo 的 fork 设为 private。私有自用要用
 - untracked 软链指向 cwd 外文件 → 被 skip,目标内容不出现在输出
 - untracked 普通文本文件 → 正常读取
 - untracked 软链指向 cwd 内文件 → 取保守策略(建议仍按相对路径处理或 skip,二选一并测试固化)
-**Status**: Not Started
+**Status**: Complete(487b54d + 138958e;详见 CHANGELOG-FORK)
 
 ## Stage 3: 第一批根因修复(#302, #312, #300)
 **Goal**: 消除「卡死 / 无响应」的核心根因(request/captureTurn 永等 + broker shutdown hang)
@@ -90,7 +90,7 @@ GitHub **不允许**把 public repo 的 fork 设为 private。私有自用要用
 - 每个 PR 自带测试合并并通过
 - 回归:`npm test` 全绿、`npm run build` 成功
 - 手动:模拟 app-server 不响应 → 验证超时/watchdog 退出而非永久卡住
-**Status**: Not Started
+**Status**: Complete(#302=18d3ee9、#300=357893b;#312 被 #361 取代不合入)
 
 ## Stage 4: 第二批加固(按需:#361, #343, #294, #355, #346)
 **Goal**: 进一步加固 broker/worker 生命周期与 auth/session 边界
@@ -98,7 +98,7 @@ GitHub **不允许**把 public repo 的 fork 设为 private。私有自用要用
 - 选定 PR 通过双审 + 干净落地 + 测试绿
 - #346(2515 行)若审计成本过高 → 拆分或暂缓,并在 `CHANGELOG-FORK.md` 标注「未合并 + 原因」
 **Tests**: 各 PR 测试 + 全量回归
-**Status**: Not Started
+**Status**: Complete(#361=8be4ab3 + 多轮加固;#294/#343/#355/#346 HOLD,理由见 CHANGELOG-FORK)
 
 ## Stage 5: 让稳定版实际生效 + 持续同步
 **Goal**: 本地 Claude Code 实际用上 fork 的稳定版;固化同步与审计流程
@@ -107,7 +107,7 @@ GitHub **不允许**把 public repo 的 fork 设为 private。私有自用要用
 - 实跑若干 `/codex:review`、`/codex:rescue` 任务,确认不再卡死
 - 写 `MAINTAINING.md`:如何 `rebase upstream`、如何审计新 PR(引用本 Checklist)、tag 规范(如 `1.0.4-stable.N`)
 **Tests**: 真实使用验证(review/rescue 各跑通、无 hang);记录前后对比
-**Status**: Not Started
+**Status**: Complete(本地 marketplace 指向 fork,版本 pin 100.0.x;MAINTAINING.md 未单独成文,流程暂以本文件 Checklist + CHANGELOG-FORK 为准)
 
 ---
 
