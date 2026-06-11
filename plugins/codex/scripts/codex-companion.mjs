@@ -160,12 +160,14 @@ function resolveCommandCwd(options = {}, { requireExists = false } = {}) {
     return process.cwd();
   }
   const given = String(options.cwd);
-  // Resolve an absolute --cwd without consulting process.cwd(): a detached
-  // task-worker reads an absolute --cwd while its own working directory may
-  // already have been deleted. On Linux process.cwd() then throws (ENOENT)
-  // outside runTrackedJob's failure handling — leaving the job a queued ghost.
-  // (macOS getcwd() returns the stale path instead, so only Linux hits this.)
-  const resolved = path.isAbsolute(given) ? path.normalize(given) : path.resolve(process.cwd(), given);
+  // path.resolve(given) only consults process.cwd() for RELATIVE paths, so a
+  // detached task-worker handing in an absolute --cwd never touches its own
+  // process cwd — which may already have been deleted, where Linux
+  // process.cwd() throws (ENOENT) outside runTrackedJob's failure handling and
+  // leaves the job a queued ghost. (macOS getcwd() returns the stale path.)
+  // Unlike path.normalize, resolve also strips trailing slashes, keeping the
+  // state-dir key identical to the one used when the job was created.
+  const resolved = path.resolve(given);
   if (requireExists) {
     let isDirectory = false;
     try {

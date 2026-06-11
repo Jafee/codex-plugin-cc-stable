@@ -2369,15 +2369,16 @@ test("task-worker marks the job failed even when its own cwd was deleted", () =>
   // deletes its own working directory before the companion code runs, exactly
   // as if the target worktree was removed right after the worker spawned. The
   // failure must flow through runTrackedJob (job flips to failed) instead of
-  // throwing earlier and leaving a permanently-queued ghost record. Note the
-  // ghost only reproduces on Linux, where process.cwd() throws ENOENT for a
-  // deleted directory; macOS getcwd() returns the stale path, so there this
-  // test exercises the in-state-machine failure path but cannot bite on the
-  // pre-fix code.
+  // throwing earlier and leaving a permanently-queued ghost record. Two ghost
+  // ingredients are covered: the deleted process cwd (Linux process.cwd()
+  // throws ENOENT for it; macOS getcwd() returns the stale path) and a
+  // trailing-slash --cwd, which must hash to the same state dir as the
+  // slash-free path the job was recorded under — otherwise the stored job is
+  // not even found, on every platform.
   const wrapper = [
     'import fs from "node:fs";',
     "fs.rmSync(process.cwd(), { recursive: true, force: true });",
-    `process.argv = [process.argv[0], "codex-companion", "task-worker", "--cwd", ${JSON.stringify(target)}, "--job-id", ${JSON.stringify(jobId)}];`,
+    `process.argv = [process.argv[0], "codex-companion", "task-worker", "--cwd", ${JSON.stringify(`${target}/`)}, "--job-id", ${JSON.stringify(jobId)}];`,
     `await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});`
   ].join("\n");
 
