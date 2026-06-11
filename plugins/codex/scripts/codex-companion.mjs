@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -158,7 +159,13 @@ function resolveCommandCwd(options = {}, { requireExists = false } = {}) {
   if (!options.cwd) {
     return process.cwd();
   }
-  const resolved = path.resolve(process.cwd(), options.cwd);
+  const given = String(options.cwd);
+  // Resolve an absolute --cwd without consulting process.cwd(): a detached
+  // task-worker reads an absolute --cwd while its own working directory may
+  // already have been deleted. On Linux process.cwd() then throws (ENOENT)
+  // outside runTrackedJob's failure handling — leaving the job a queued ghost.
+  // (macOS getcwd() returns the stale path instead, so only Linux hits this.)
+  const resolved = path.isAbsolute(given) ? path.normalize(given) : path.resolve(process.cwd(), given);
   if (requireExists) {
     let isDirectory = false;
     try {
@@ -670,7 +677,12 @@ async function runForegroundCommand(job, runner, options = {}) {
 function spawnDetachedTaskWorker(cwd, jobId) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
   const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
-    cwd,
+    // Launch from a directory that cannot be deleted out from under the
+    // worker. With the target workspace as the process cwd, deleting that
+    // workspace (worktree cleanup) can make the worker's own process.cwd()
+    // throw before runTrackedJob marks the job failed; the target directory
+    // itself travels via --cwd.
+    cwd: os.tmpdir(),
     env: process.env,
     detached: true,
     stdio: "ignore",

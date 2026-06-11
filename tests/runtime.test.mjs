@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveJobFile, resolveStateDir, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -2277,7 +2277,7 @@ test("task fails fast when --cwd points at a missing directory", () => {
   assert.match(`${result.stdout}\n${result.stderr}`, /not an existing directory/);
 });
 
-test("status and result still work after the workspace directory is deleted", () => {
+test("status, result, cancel, and resume-candidate still work after the workspace directory is deleted", (t) => {
   const target = fs.realpathSync(makeTempDir());
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -2293,6 +2293,29 @@ test("status and result still work after the workspace directory is deleted", ()
   const task = run("node", [SCRIPT, "task", "do something"], { cwd: target, env });
   assert.equal(task.status, 0, task.stderr);
 
+  // A still-running job (a live placeholder process stands in for a worker)
+  // recorded before the directory disappears: cancel must keep working too.
+  const sleeper = spawn("sleep", ["60"], { stdio: "ignore" });
+  t.after(() => {
+    try {
+      process.kill(sleeper.pid, "SIGKILL");
+    } catch {
+      // Already reaped by the cancel under test.
+    }
+  });
+  const runningJobId = "task-cancel-after-delete";
+  const runningRecord = {
+    id: runningJobId,
+    kind: "task",
+    title: "Codex Task",
+    status: "running",
+    phase: "working",
+    pid: sleeper.pid,
+    workspaceRoot: target
+  };
+  writeJobFile(target, runningJobId, runningRecord);
+  upsertJob(target, runningRecord);
+
   // Job state is keyed by the workspace path string and lives outside the
   // workspace, so deleting the directory (the normal worktree-cleanup flow)
   // must not lock the recorded jobs away from status/result/cancel.
@@ -2305,6 +2328,72 @@ test("status and result still work after the workspace directory is deleted", ()
   const result = run("node", [SCRIPT, "result", "--cwd", target], { cwd: ROOT, env });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Handled the requested task/);
+
+  const cancel = run("node", [SCRIPT, "cancel", runningJobId, "--cwd", target], { cwd: ROOT, env });
+  assert.equal(cancel.status, 0, cancel.stderr);
+  const cancelled = JSON.parse(fs.readFileSync(resolveJobFile(target, runningJobId), "utf8"));
+  assert.equal(cancelled.status, "cancelled");
+
+  const candidate = run("node", [SCRIPT, "task-resume-candidate", "--cwd", target, "--json"], { cwd: ROOT, env });
+  assert.equal(candidate.status, 0, candidate.stderr);
+});
+
+test("task-worker marks the job failed even when its own cwd was deleted", () => {
+  const target = fs.realpathSync(makeTempDir());
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(target);
+
+  const jobId = "task-ghost-worker";
+  const record = {
+    id: jobId,
+    kind: "task",
+    title: "Codex Task",
+    status: "queued",
+    phase: "queued",
+    workspaceRoot: target,
+    request: {
+      cwd: target,
+      model: null,
+      effort: null,
+      prompt: "do something",
+      write: false,
+      resumeLast: false,
+      jobId
+    }
+  };
+  writeJobFile(target, jobId, record);
+  upsertJob(target, record);
+
+  // Reproduce the worker-vs-cleanup race deterministically: the worker process
+  // deletes its own working directory before the companion code runs, exactly
+  // as if the target worktree was removed right after the worker spawned. The
+  // failure must flow through runTrackedJob (job flips to failed) instead of
+  // throwing earlier and leaving a permanently-queued ghost record. Note the
+  // ghost only reproduces on Linux, where process.cwd() throws ENOENT for a
+  // deleted directory; macOS getcwd() returns the stale path, so there this
+  // test exercises the in-state-machine failure path but cannot bite on the
+  // pre-fix code.
+  const wrapper = [
+    'import fs from "node:fs";',
+    "fs.rmSync(process.cwd(), { recursive: true, force: true });",
+    `process.argv = [process.argv[0], "codex-companion", "task-worker", "--cwd", ${JSON.stringify(target)}, "--job-id", ${JSON.stringify(jobId)}];`,
+    `await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});`
+  ].join("\n");
+
+  const result = run("node", ["--input-type=module", "-e", wrapper], {
+    cwd: target,
+    env: buildEnv(binDir),
+    timeout: 30000
+  });
+
+  const stored = JSON.parse(fs.readFileSync(resolveJobFile(target, jobId), "utf8"));
+  assert.equal(
+    stored.status,
+    "failed",
+    `expected the job to be marked failed, got "${stored.status}" (worker exit ${result.status}, stderr: ${result.stderr})`
+  );
+  assert.ok(stored.errorMessage, "expected an error message on the failed job");
 });
 
 test("a literal --cd token after -- stays in the prompt text", () => {
