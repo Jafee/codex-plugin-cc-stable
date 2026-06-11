@@ -162,11 +162,13 @@ function resolveCommandCwd(options = {}, { requireExists = false } = {}) {
   const given = String(options.cwd);
   // path.resolve(given) only consults process.cwd() for RELATIVE paths, so a
   // detached task-worker handing in an absolute --cwd never touches its own
-  // process cwd — which may already have been deleted, where Linux
-  // process.cwd() throws (ENOENT) outside runTrackedJob's failure handling and
-  // leaves the job a queued ghost. (macOS getcwd() returns the stale path.)
-  // Unlike path.normalize, resolve also strips trailing slashes, keeping the
-  // state-dir key identical to the one used when the job was created.
+  // process cwd. That matters because a fresh worker's first process.cwd()
+  // call goes straight to uv_cwd (Node's JS-level cwd cache is still cold),
+  // which throws ENOENT on every platform when the spawn cwd has since been
+  // deleted — outside runTrackedJob's failure handling, leaving the job a
+  // queued ghost. Unlike path.normalize, resolve also strips trailing
+  // slashes, keeping the state-dir key identical to the one used when the
+  // job was created.
   const resolved = path.resolve(given);
   if (requireExists) {
     let isDirectory = false;
@@ -681,9 +683,11 @@ function spawnDetachedTaskWorker(cwd, jobId) {
   const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
     // Launch from a directory that cannot be deleted out from under the
     // worker. With the target workspace as the process cwd, deleting that
-    // workspace (worktree cleanup) can make the worker's own process.cwd()
-    // throw before runTrackedJob marks the job failed; the target directory
-    // itself travels via --cwd.
+    // workspace (worktree cleanup) either fails the spawn outright (deleted
+    // before spawn; the detached child errors unobserved) or makes the
+    // worker's first cold process.cwd() hit uv_cwd and throw ENOENT before
+    // runTrackedJob marks the job failed; the target directory itself
+    // travels via --cwd.
     cwd: os.tmpdir(),
     env: process.env,
     detached: true,

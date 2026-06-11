@@ -2295,7 +2295,9 @@ test("status, result, cancel, and resume-candidate still work after the workspac
 
   // A still-running job (a live placeholder process stands in for a worker)
   // recorded before the directory disappears: cancel must keep working too.
-  const sleeper = spawn("sleep", ["60"], { stdio: "ignore" });
+  // detached makes the placeholder a process-group leader, like a real
+  // detached worker, so terminateProcessTree's kill(-pid) actually reaches it.
+  const sleeper = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
   t.after(() => {
     try {
       process.kill(sleeper.pid, "SIGKILL");
@@ -2370,14 +2372,20 @@ test("task-worker marks the job failed even when its own cwd was deleted", () =>
   // as if the target worktree was removed right after the worker spawned. The
   // failure must flow through runTrackedJob (job flips to failed) instead of
   // throwing earlier and leaving a permanently-queued ghost record. Two ghost
-  // ingredients are covered: the deleted process cwd (Linux process.cwd()
-  // throws ENOENT for it; macOS getcwd() returns the stale path) and a
-  // trailing-slash --cwd, which must hash to the same state dir as the
+  // ingredients are covered: a process.cwd() consulted after the directory is
+  // gone (the chdir below invalidates Node's JS-level cwd cache, so the next
+  // process.cwd() reaches uv_cwd and throws ENOENT on every platform — without
+  // the chdir, rmSync(process.cwd()) would warm the cache and mask the bug)
+  // and a trailing-slash --cwd, which must hash to the same state dir as the
   // slash-free path the job was recorded under — otherwise the stored job is
-  // not even found, on every platform.
+  // not even found.
   const wrapper = [
     'import fs from "node:fs";',
-    "fs.rmSync(process.cwd(), { recursive: true, force: true });",
+    `process.chdir(${JSON.stringify(target)});`,
+    `fs.rmSync(${JSON.stringify(target)}, { recursive: true, force: true });`,
+    // Self-check: a silently failed delete would make the rest of the test
+    // vacuous (the worker would just run normally), so bail out loudly.
+    `if (fs.existsSync(${JSON.stringify(target)})) { console.error("RM-FAILED"); process.exit(99); }`,
     `process.argv = [process.argv[0], "codex-companion", "task-worker", "--cwd", ${JSON.stringify(`${target}/`)}, "--job-id", ${JSON.stringify(jobId)}];`,
     `await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});`
   ].join("\n");
