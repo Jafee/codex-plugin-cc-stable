@@ -445,6 +445,23 @@ rl.on("line", (line) => {
           ? structuredReviewPayload(prompt)
           : taskPayload(prompt, thread.name && thread.name.startsWith("Codex Companion Task") && prompt.includes("Continue from the current thread state"));
 
+        if (BEHAVIOR === "quiet-after-command-start" || BEHAVIOR === "command-never-completes") {
+          // A command starts and then the wire goes silent: "quiet-after-command-start"
+          // finishes well past the stall window (the silence must NOT be treated
+          // as a wedge while the command is in flight); "command-never-completes"
+          // stays silent forever (the ceiling must still bound it).
+          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+          send({ method: "item/started", params: { threadId: thread.id, turnId, item: { type: "commandExecution", id: "cmd_" + turnId, command: "sleep 9999", status: "inProgress" } } });
+          if (BEHAVIOR === "quiet-after-command-start") {
+            setTimeout(() => {
+              send({ method: "item/completed", params: { threadId: thread.id, turnId, item: { type: "commandExecution", id: "cmd_" + turnId, command: "sleep 9999", status: "completed", exitCode: 0 } } });
+              send({ method: "item/completed", params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: "final_answer" } } });
+              send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
+            }, 1500);
+          }
+          break;
+        }
+
         if (
           BEHAVIOR === "with-subagent" ||
           BEHAVIOR === "with-late-subagent-message" ||

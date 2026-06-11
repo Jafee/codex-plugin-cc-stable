@@ -77,7 +77,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [-C|--cwd <dir>] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -140,13 +140,31 @@ function parseCommandInput(argv, config = {}) {
     ...config,
     aliasMap: {
       C: "cwd",
+      // The Codex CLI itself spells this flag `--cd`; accept it here too so a
+      // caller using that spelling routes the run instead of having the flag
+      // silently swallowed into the prompt text (and Codex then running in the
+      // wrong directory).
+      cd: "cwd",
       ...(config.aliasMap ?? {})
     }
   });
 }
 
 function resolveCommandCwd(options = {}) {
-  return options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
+  if (!options.cwd) {
+    return process.cwd();
+  }
+  const resolved = path.resolve(process.cwd(), options.cwd);
+  let isDirectory = false;
+  try {
+    isDirectory = fs.statSync(resolved).isDirectory();
+  } catch {
+    isDirectory = false;
+  }
+  if (!isDirectory) {
+    throw new Error(`--cwd is not an existing directory: ${resolved}`);
+  }
+  return resolved;
 }
 
 function resolveCommandWorkspace(options = {}) {
@@ -458,6 +476,10 @@ async function executeReviewRun(request) {
 async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
   ensureCodexAvailable(request.cwd);
+  // Surface where the run actually lands (stderr + job log) so a mis-routed
+  // cwd — e.g. a worktree task that fell back to the main checkout — is
+  // visible instead of silently writing to the wrong tree.
+  request.onProgress?.(`Workspace root: ${workspaceRoot}`);
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
@@ -508,6 +530,7 @@ async function executeTaskRun(request) {
   const payload = {
     status: result.status,
     threadId: result.threadId,
+    workspaceRoot,
     rawOutput,
     touchedFiles: result.touchedFiles,
     reasoningSummary: result.reasoningSummary

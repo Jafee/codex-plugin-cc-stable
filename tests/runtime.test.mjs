@@ -2178,6 +2178,105 @@ test("task fails fast instead of hanging when the turn never completes", () => {
   assert.ok(elapsedMs < 30000, `expected a fast stall failure, took ${elapsedMs}ms`);
 });
 
+test("a quiet turn with an in-flight command is not treated as stalled", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "quiet-after-command-start");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // The fake stays silent for 3x the stall window while a commandExecution item
+  // is in flight. Known in-flight work means "working quietly", not wedged, so
+  // the turn must be allowed to finish.
+  const result = run("node", [SCRIPT, "task", "do something"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_TURN_STALL_MS: "500",
+      CODEX_COMPANION_BROKER_IDLE_MS: "1000"
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task/);
+});
+
+test("a hung in-flight command is still bounded by the turn ceiling", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "command-never-completes");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // In-flight work suppresses the stall guard, so a command that never
+  // completes must still fail at the absolute ceiling rather than hang.
+  const start = Date.now();
+  const result = run("node", [SCRIPT, "task", "do something"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_TURN_STALL_MS: "300",
+      CODEX_COMPANION_TURN_TIMEOUT_MS: "1500",
+      CODEX_COMPANION_BROKER_IDLE_MS: "1000"
+    }
+  });
+  const elapsedMs = Date.now() - start;
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /ceiling/i);
+  assert.ok(elapsedMs < 30000, `expected a fast ceiling failure, took ${elapsedMs}ms`);
+});
+
+test("task --cd routes the Codex turn to the requested directory", () => {
+  const invocationDir = makeTempDir();
+  const target = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(target);
+  fs.writeFileSync(path.join(target, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: target });
+  run("git", ["commit", "-m", "init"], { cwd: target });
+
+  // `--cd` is the Codex CLI's own spelling for the working directory; the
+  // companion must route the run there instead of swallowing the flag into the
+  // prompt text and running in the invoking process's cwd.
+  const result = run("node", [SCRIPT, "task", "--cd", target, "do something"], {
+    cwd: invocationDir,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_BROKER_IDLE_MS: "1000"
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Workspace root: /);
+
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  const expected = fs.realpathSync(target);
+  assert.ok(
+    fakeState.threads.some((thread) => fs.realpathSync(thread.cwd) === expected),
+    `expected a thread rooted at ${expected}, got ${JSON.stringify(fakeState.threads.map((thread) => thread.cwd))}`
+  );
+});
+
+test("task fails fast when --cwd points at a missing directory", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+
+  const result = run("node", [SCRIPT, "task", "--cwd", path.join(repo, "missing-worktree"), "do something"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /not an existing directory/);
+});
+
 test("broker self-shuts-down after the idle window with no clients", async () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

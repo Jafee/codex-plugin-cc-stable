@@ -23,6 +23,7 @@
  *   finalAnswerSeen: boolean,
  *   pendingCollaborations: Set<string>,
  *   activeSubagentTurns: Set<string>,
+ *   inFlightItems: Set<string>,
  *   completionTimer: ReturnType<typeof setTimeout> | null,
  *   lastAgentMessage: string,
  *   reviewText: string,
@@ -318,6 +319,7 @@ function createTurnCaptureState(threadId, options = {}) {
     finalAnswerSeen: false,
     pendingCollaborations: new Set(),
     activeSubagentTurns: new Set(),
+    inFlightItems: new Set(),
     completionTimer: null,
     lastAgentMessage: "",
     reviewText: "",
@@ -515,6 +517,9 @@ function applyTurnNotification(state, message) {
       );
       break;
     case "item/started":
+      if (typeof message.params.item?.id === "string" && message.params.item.id) {
+        state.inFlightItems.add(message.params.item.id);
+      }
       recordItem(state, message.params.item, "started", message.params.threadId ?? null);
       {
         const update = describeStartedItem(state, message.params.item);
@@ -522,6 +527,9 @@ function applyTurnNotification(state, message) {
       }
       break;
     case "item/completed":
+      if (typeof message.params.item?.id === "string" && message.params.item.id) {
+        state.inFlightItems.delete(message.params.item.id);
+      }
       recordItem(state, message.params.item, "completed", message.params.threadId ?? null);
       {
         const update = describeCompletedItem(state, message.params.item);
@@ -570,6 +578,19 @@ async function interruptTurnBestEffort(client, threadId, turnId) {
   }
 }
 
+// Inbound silence is only a wedge signal when nothing is known to be running.
+// A started-but-not-completed item (a long test run, a slow tool call), an
+// active subagent turn, or a pending collaboration all mean Codex is working
+// quietly, so the stall guard must not abandon the turn; the ceiling still
+// bounds the case where that in-flight work itself hangs forever.
+function hasInFlightWork(state) {
+  return (
+    state.inFlightItems.size > 0 ||
+    state.activeSubagentTurns.size > 0 ||
+    state.pendingCollaborations.size > 0
+  );
+}
+
 async function captureTurn(client, threadId, startRequest, options = {}) {
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
@@ -581,12 +602,15 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   // dies mid-turn would leave `await state.completion` hanging forever, which
   // surfaces as a "stuck" Codex run. Bound the wait three ways so it always
   // fails toward "didn't finish" instead of hanging:
-  //   - STALL_MS:   no inbound traffic at all for this long => treat as stalled.
+  //   - STALL_MS:   no inbound traffic AND no in-flight work => treat as stalled.
   //   - CEILING_MS: absolute backstop on a single turn.
   //   - exit:       app-server process death rejects immediately.
-  // Both timeouts are env-overridable for genuinely long turns.
-  const CEILING_MS = resolveTimeoutMs("CODEX_COMPANION_TURN_TIMEOUT_MS", 1_800_000);
-  const STALL_MS = resolveTimeoutMs("CODEX_COMPANION_TURN_STALL_MS", 600_000);
+  // Both timeouts are env-overridable for genuinely long turns. The defaults
+  // must comfortably clear real long-effort runs: xhigh implementation turns
+  // close to 30 minutes were observed in practice, so the ceiling sits at 90
+  // minutes and true-silence stalls at 20.
+  const CEILING_MS = resolveTimeoutMs("CODEX_COMPANION_TURN_TIMEOUT_MS", 5_400_000);
+  const STALL_MS = resolveTimeoutMs("CODEX_COMPANION_TURN_STALL_MS", 1_200_000);
   let lastActivity = Date.now();
   let ceilingTimer = null;
   let stallTimer = null;
@@ -633,16 +657,22 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 
   const stall = new Promise((_resolve, reject) => {
     stallTimer = setInterval(() => {
-      if (Date.now() - lastActivity >= STALL_MS) {
-        reject(
-          Object.assign(
-            new Error(
-              `Codex turn produced no activity for ${Math.round(STALL_MS / 1000)}s (raise CODEX_COMPANION_TURN_STALL_MS for long silent turns) — likely a hung MCP server or wedged turn. Treating as stalled.`
-            ),
-            { turnAbandoned: true }
-          )
-        );
+      if (Date.now() - lastActivity < STALL_MS) {
+        return;
       }
+      if (hasInFlightWork(state)) {
+        // Known in-flight work: silence means Codex is busy (long command, slow
+        // tool call, subagent turn), not wedged. The ceiling still bounds it.
+        return;
+      }
+      reject(
+        Object.assign(
+          new Error(
+            `Codex turn produced no activity for ${Math.round(STALL_MS / 1000)}s with no in-flight work (raise CODEX_COMPANION_TURN_STALL_MS for long silent turns) — likely a wedged turn. Treating as stalled.`
+          ),
+          { turnAbandoned: true }
+        )
+      );
     }, Math.min(STALL_MS, 30_000));
     stallTimer.unref?.();
   });

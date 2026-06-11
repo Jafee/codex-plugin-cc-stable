@@ -28,6 +28,8 @@ Command selection:
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
 - If the forwarded request includes `--effort`, pass it through to `task`.
+- If the forwarded request includes `-C`, `--cwd`, or `--cd` with a directory, strip it from the task text and pass it through to `task` as `-C <absolute path>`.
+- If the request names a target directory or git worktree, pass it as `-C <absolute path>`. The default is the invoking process's own cwd — for subagents usually the main checkout, not the worktree — so omitting `-C` makes Codex edit the wrong tree.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.
