@@ -1,17 +1,17 @@
 {
-  "name": "openai-codex",
+  "name": "codex-stable",
   "owner": {
-    "name": "OpenAI"
+    "name": "Jafee (fork of OpenAI codex plugin)"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
-    "version": "100.0.2"
+    "description": "Privately maintained stable fork of the OpenAI Codex plugins for Claude Code (delegation and code review).",
+    "version": "100.0.3"
   },
   "plugins": [
     {
-      "name": "codex",
-      "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "100.0.2",
+      "name": "codex-stable",
+      "description": "Use Codex from Claude Code to review code or delegate tasks (stable fork).",
+      "version": "100.0.3",
       "author": {
         "name": "OpenAI"
       },
