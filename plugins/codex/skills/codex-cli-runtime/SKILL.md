@@ -30,6 +30,7 @@ Command selection:
 - If the forwarded request includes `--effort`, pass it through to `task`.
 - If the forwarded request includes `-C`, `--cwd`, or `--cd` with a directory, strip it from the task text and pass it through to `task` as `-C <absolute path>`.
 - If the request names a target directory or git worktree, pass it as `-C <absolute path>`. The default is the invoking process's own cwd — for subagents usually the main checkout, not the worktree — so omitting `-C` makes Codex edit the wrong tree.
+- If the task text must contain a literal `-C`, `--cwd`, or `--cd` token, put routing flags first and separate the prompt with `--` so the text is passed through verbatim.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.

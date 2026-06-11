@@ -2277,6 +2277,60 @@ test("task fails fast when --cwd points at a missing directory", () => {
   assert.match(`${result.stdout}\n${result.stderr}`, /not an existing directory/);
 });
 
+test("status and result still work after the workspace directory is deleted", () => {
+  const target = fs.realpathSync(makeTempDir());
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(target);
+  fs.writeFileSync(path.join(target, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: target });
+  run("git", ["commit", "-m", "init"], { cwd: target });
+
+  const env = {
+    ...buildEnv(binDir),
+    CODEX_COMPANION_BROKER_IDLE_MS: "1000"
+  };
+  const task = run("node", [SCRIPT, "task", "do something"], { cwd: target, env });
+  assert.equal(task.status, 0, task.stderr);
+
+  // Job state is keyed by the workspace path string and lives outside the
+  // workspace, so deleting the directory (the normal worktree-cleanup flow)
+  // must not lock the recorded jobs away from status/result/cancel.
+  fs.rmSync(target, { recursive: true, force: true });
+
+  const status = run("node", [SCRIPT, "status", "--all", "--cwd", target], { cwd: ROOT, env });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /Codex Task/);
+
+  const result = run("node", [SCRIPT, "result", "--cwd", target], { cwd: ROOT, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task/);
+});
+
+test("a literal --cd token after -- stays in the prompt text", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // The documented escape hatch for prompts that mention routing flags: after
+  // `--` everything is task text, so `--cd` must not be consumed as a flag.
+  const result = run("node", [SCRIPT, "task", "-- explain the codex --cd flag"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_BROKER_IDLE_MS: "1000"
+    }
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.match(fakeState.lastTurnStart.prompt, /explain the codex --cd flag/);
+});
+
 test("broker self-shuts-down after the idle window with no clients", async () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

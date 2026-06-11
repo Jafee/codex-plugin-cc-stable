@@ -77,7 +77,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [-C|--cwd <dir>] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [-C|--cwd|--cd <dir>] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -150,19 +150,25 @@ function parseCommandInput(argv, config = {}) {
   });
 }
 
-function resolveCommandCwd(options = {}) {
+// `requireExists` is for commands that are about to START Codex work in that
+// directory — they must fail fast on a typo or vanished worktree. Job-control
+// commands (status/result/cancel) stay lenient: their state is keyed by the
+// path string, so they must keep working after the directory itself is gone.
+function resolveCommandCwd(options = {}, { requireExists = false } = {}) {
   if (!options.cwd) {
     return process.cwd();
   }
   const resolved = path.resolve(process.cwd(), options.cwd);
-  let isDirectory = false;
-  try {
-    isDirectory = fs.statSync(resolved).isDirectory();
-  } catch {
-    isDirectory = false;
-  }
-  if (!isDirectory) {
-    throw new Error(`--cwd is not an existing directory: ${resolved}`);
+  if (requireExists) {
+    let isDirectory = false;
+    try {
+      isDirectory = fs.statSync(resolved).isDirectory();
+    } catch {
+      isDirectory = false;
+    }
+    if (!isDirectory) {
+      throw new Error(`Working directory (-C/--cwd/--cd) is not an existing directory: ${resolved}`);
+    }
   }
   return resolved;
 }
@@ -711,7 +717,7 @@ async function handleReviewCommand(argv, config) {
     }
   });
 
-  const cwd = resolveCommandCwd(options);
+  const cwd = resolveCommandCwd(options, { requireExists: true });
   const workspaceRoot = resolveCommandWorkspace(options);
   const focusText = positionals.join(" ").trim();
   const target = resolveReviewTarget(cwd, {
@@ -761,7 +767,7 @@ async function handleTask(argv) {
     }
   });
 
-  const cwd = resolveCommandCwd(options);
+  const cwd = resolveCommandCwd(options, { requireExists: true });
   const workspaceRoot = resolveCommandWorkspace(options);
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
