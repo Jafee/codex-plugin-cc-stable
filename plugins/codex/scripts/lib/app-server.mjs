@@ -67,6 +67,7 @@ const DEFAULT_CLIENT_INFO = {
 /** @type {InitializeCapabilities} */
 const DEFAULT_CAPABILITIES = {
   experimentalApi: false,
+  requestAttestation: false,
   optOutNotificationMethods: [
     "item/agentMessage/delta",
     "item/reasoning/summaryTextDelta",
@@ -117,7 +118,7 @@ class AppServerClientBase {
    * @param {import("./app-server-protocol").AppServerRequestParams<M>} params
    * @returns {Promise<import("./app-server-protocol").AppServerResponse<M>>}
    */
-  request(method, params) {
+  request(method, params, options = {}) {
     if (this.closed) {
       throw new Error("codex app-server client is closed.");
     }
@@ -126,9 +127,15 @@ class AppServerClientBase {
     this.nextId += 1;
 
     return new Promise((resolve, reject) => {
-      const timeoutMs = resolveTimeoutMs("CODEX_APP_SERVER_RPC_TIMEOUT_MS", DEFAULT_RPC_TIMEOUT_MS, {
-        allowDisable: true
-      });
+      // A caller may raise the bound for a single slow RPC (e.g. session
+      // import); the override must stay finite and clamped like the env value.
+      const override = Number(options.timeoutMs);
+      const timeoutMs =
+        Number.isFinite(override) && override > 0
+          ? Math.min(override, MAX_TIMER_MS)
+          : resolveTimeoutMs("CODEX_APP_SERVER_RPC_TIMEOUT_MS", DEFAULT_RPC_TIMEOUT_MS, {
+              allowDisable: true
+            });
       let timer = null;
       const wrappedResolve = (value) => {
         if (timer) clearTimeout(timer);
@@ -262,10 +269,13 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     });
 
     this.proc.on("exit", (code, signal) => {
+      const stderr = this.stderr.trim();
       const detail =
         code === 0
           ? null
-          : createProtocolError(`codex app-server exited unexpectedly (${signal ? `signal ${signal}` : `exit ${code}`}).`);
+          : createProtocolError(
+              `codex app-server exited unexpectedly (${signal ? `signal ${signal}` : `exit ${code}`}).${stderr ? `\n${stderr}` : ""}`
+            );
       this.handleExit(detail);
     });
 
