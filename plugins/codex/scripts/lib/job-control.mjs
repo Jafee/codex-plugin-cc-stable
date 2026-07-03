@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+import { getConfig, listJobs, listSessionJobGroups, readJobFile, resolveJobFile, resolveStateDir } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -22,6 +22,23 @@ function filterJobsForCurrentSession(jobs, options = {}) {
     return jobs;
   }
   return jobs.filter((job) => job.sessionId === sessionId);
+}
+
+// A job launched with -C <another-workspace> (e.g. by a subagent running in a
+// worktree) is registered under that workspace's state dir, so the session's
+// own status/result/cancel could not see it from the main checkout. Jobs
+// without a recorded workspaceRoot are skipped: follow-up commands could not
+// locate their job files anyway.
+function listOtherWorkspaceSessionJobs(workspaceRoot, options = {}) {
+  const sessionId = getCurrentSessionId(options);
+  if (!sessionId) {
+    return [];
+  }
+  const currentStateDir = resolveStateDir(workspaceRoot);
+  return listSessionJobGroups(sessionId)
+    .filter((group) => group.stateDir !== currentStateDir)
+    .flatMap((group) => group.jobs)
+    .filter((job) => typeof job.workspaceRoot === "string" && job.workspaceRoot);
 }
 
 function getJobTypeLabel(job) {
@@ -213,7 +230,10 @@ function matchJobReference(jobs, reference, predicate = () => true) {
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
+  const jobs = sortJobsNewestFirst([
+    ...filterJobsForCurrentSession(listJobs(workspaceRoot), options),
+    ...listOtherWorkspaceSessionJobs(workspaceRoot, options)
+  ]);
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
@@ -241,7 +261,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
 
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const jobs = sortJobsNewestFirst([...listJobs(workspaceRoot), ...listOtherWorkspaceSessionJobs(workspaceRoot, options)]);
   const selected = matchJobReference(jobs, reference);
   if (!selected) {
     throw new Error(`No job found for "${reference}". Run /codex-stable:status to inspect known jobs.`);
@@ -255,7 +275,8 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 
 export function resolveResultJob(cwd, reference) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot)));
+  const localJobs = reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot));
+  const jobs = sortJobsNewestFirst([...localJobs, ...listOtherWorkspaceSessionJobs(workspaceRoot)]);
   const selected = matchJobReference(
     jobs,
     reference,
@@ -263,7 +284,7 @@ export function resolveResultJob(cwd, reference) {
   );
 
   if (selected) {
-    return { workspaceRoot, job: selected };
+    return { workspaceRoot: selected.workspaceRoot ?? workspaceRoot, job: selected };
   }
 
   const active = matchJobReference(jobs, reference, (job) => job.status === "queued" || job.status === "running");
@@ -280,7 +301,7 @@ export function resolveResultJob(cwd, reference) {
 
 export function resolveCancelableJob(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const jobs = sortJobsNewestFirst([...listJobs(workspaceRoot), ...listOtherWorkspaceSessionJobs(workspaceRoot, options)]);
   const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
 
   if (reference) {
@@ -288,13 +309,14 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
     if (!selected) {
       throw new Error(`No active job found for "${reference}".`);
     }
-    return { workspaceRoot, job: selected };
+    return { workspaceRoot: selected.workspaceRoot ?? workspaceRoot, job: selected };
   }
 
   const sessionScopedActiveJobs = filterJobsForCurrentSession(activeJobs, options);
 
   if (sessionScopedActiveJobs.length === 1) {
-    return { workspaceRoot, job: sessionScopedActiveJobs[0] };
+    const selected = sessionScopedActiveJobs[0];
+    return { workspaceRoot: selected.workspaceRoot ?? workspaceRoot, job: selected };
   }
   if (sessionScopedActiveJobs.length > 1) {
     throw new Error("Multiple Codex jobs are active. Pass a job id to /codex-stable:cancel.");

@@ -13,9 +13,8 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
+import { listSessionJobGroups, removeSessionJobsFromStateDir } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
-import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -39,39 +38,28 @@ function appendEnvVar(name, value) {
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
 }
 
-function cleanupSessionJobs(cwd, sessionId) {
-  if (!cwd || !sessionId) {
+function cleanupSessionJobs(sessionId) {
+  if (!sessionId) {
     return;
   }
 
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const stateFile = resolveStateFile(workspaceRoot);
-  if (!fs.existsSync(stateFile)) {
-    return;
-  }
-
-  const state = loadState(workspaceRoot);
-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
-  if (removedJobs.length === 0) {
-    return;
-  }
-
-  for (const job of removedJobs) {
-    const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
-      continue;
+  // Jobs are keyed by the workspace they ran in, so a subagent-launched
+  // worktree job lives in a different state dir than the session cwd; sweep
+  // every workspace state dir for this session's jobs.
+  for (const { stateDir, jobs } of listSessionJobGroups(sessionId)) {
+    for (const job of jobs) {
+      const stillRunning = job.status === "queued" || job.status === "running";
+      if (!stillRunning) {
+        continue;
+      }
+      try {
+        terminateProcessTree(job.pid ?? Number.NaN);
+      } catch {
+        // Ignore teardown failures during session shutdown.
+      }
     }
-    try {
-      terminateProcessTree(job.pid ?? Number.NaN);
-    } catch {
-      // Ignore teardown failures during session shutdown.
-    }
+    removeSessionJobsFromStateDir(stateDir, sessionId);
   }
-
-  saveState(workspaceRoot, {
-    ...state,
-    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
-  });
 }
 
 function handleSessionStart(input) {
@@ -101,7 +89,7 @@ async function handleSessionEnd(input) {
     await sendBrokerShutdown(brokerEndpoint);
   }
 
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  cleanupSessionJobs(input.session_id || process.env[SESSION_ID_ENV]);
   teardownBrokerSession({
     endpoint: brokerEndpoint,
     pidFile,

@@ -126,6 +126,9 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.summary) {
     lines.push(`  Summary: ${job.summary}`);
   }
+  if (options.currentWorkspaceRoot && job.workspaceRoot && job.workspaceRoot !== options.currentWorkspaceRoot) {
+    lines.push(`  Workspace: ${job.workspaceRoot}`);
+  }
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
   }
@@ -338,7 +341,8 @@ export function renderStatusReport(report) {
     for (const job of report.running) {
       pushJobDetails(lines, job, {
         showElapsed: true,
-        showLog: true
+        showLog: true,
+        currentWorkspaceRoot: report.workspaceRoot
       });
     }
     lines.push("");
@@ -348,7 +352,8 @@ export function renderStatusReport(report) {
     lines.push("Latest finished:");
     pushJobDetails(lines, report.latestFinished, {
       showDuration: true,
-      showLog: report.latestFinished.status === "failed"
+      showLog: report.latestFinished.status === "failed",
+      currentWorkspaceRoot: report.workspaceRoot
     });
     lines.push("");
   }
@@ -358,7 +363,8 @@ export function renderStatusReport(report) {
     for (const job of report.recent) {
       pushJobDetails(lines, job, {
         showDuration: true,
-        showLog: job.status === "failed"
+        showLog: job.status === "failed",
+        currentWorkspaceRoot: report.workspaceRoot
       });
     }
     lines.push("");
@@ -374,7 +380,7 @@ export function renderStatusReport(report) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function renderJobStatusReport(job) {
+export function renderJobStatusReport(job, options = {}) {
   const lines = ["# Codex Job Status", ""];
   pushJobDetails(lines, job, {
     showElapsed: job.status === "queued" || job.status === "running",
@@ -382,7 +388,8 @@ export function renderJobStatusReport(job) {
     showLog: true,
     showCancelHint: true,
     showResultHint: true,
-    showReviewHint: true
+    showReviewHint: true,
+    currentWorkspaceRoot: options.currentWorkspaceRoot ?? null
   });
   return `${lines.join("\n").trimEnd()}\n`;
 }

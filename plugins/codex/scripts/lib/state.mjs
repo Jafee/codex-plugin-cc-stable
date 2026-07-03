@@ -26,6 +26,11 @@ function defaultState() {
   };
 }
 
+export function resolveStateRootDir() {
+  const pluginDataDir = process.env[PLUGIN_DATA_ENV];
+  return pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
+}
+
 export function resolveStateDir(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   let canonicalWorkspaceRoot = workspaceRoot;
@@ -38,9 +43,7 @@ export function resolveStateDir(cwd) {
   const slugSource = path.basename(workspaceRoot) || "workspace";
   const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonicalWorkspaceRoot).digest("hex").slice(0, 16);
-  const pluginDataDir = process.env[PLUGIN_DATA_ENV];
-  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
-  return path.join(stateRoot, `${slug}-${hash}`);
+  return path.join(resolveStateRootDir(), `${slug}-${hash}`);
 }
 
 export function resolveStateFile(cwd) {
@@ -55,8 +58,7 @@ export function ensureStateDir(cwd) {
   fs.mkdirSync(resolveJobsDir(cwd), { recursive: true });
 }
 
-export function loadState(cwd) {
-  const stateFile = resolveStateFile(cwd);
+function loadStateFromFile(stateFile) {
   if (!fs.existsSync(stateFile)) {
     return defaultState();
   }
@@ -75,6 +77,71 @@ export function loadState(cwd) {
   } catch {
     return defaultState();
   }
+}
+
+export function loadState(cwd) {
+  return loadStateFromFile(resolveStateFile(cwd));
+}
+
+// Jobs are registered under the state dir of the workspace they run in
+// (resolveStateDir keys by workspace root), so a job launched with
+// -C <another-workspace> — e.g. by a subagent working in a worktree — is
+// invisible to listJobs() for every other workspace. Session-scoped commands
+// use this scan to find the current Claude session's jobs across all
+// workspace state dirs.
+export function listSessionJobGroups(sessionId) {
+  if (!sessionId) {
+    return [];
+  }
+
+  const stateRoot = resolveStateRootDir();
+  let entries = [];
+  try {
+    entries = fs.readdirSync(stateRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const groups = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const stateDir = path.join(stateRoot, entry.name);
+    const state = loadStateFromFile(path.join(stateDir, STATE_FILE_NAME));
+    const jobs = state.jobs.filter((job) => job.sessionId === sessionId);
+    if (jobs.length > 0) {
+      groups.push({ stateDir, jobs });
+    }
+  }
+  return groups;
+}
+
+// Dir-level twin of the session cleanup in saveState(): drops the session's
+// job records plus their job/log files without re-deriving the state dir from
+// a workspace path that may no longer exist.
+export function removeSessionJobsFromStateDir(stateDir, sessionId) {
+  const stateFile = path.join(stateDir, STATE_FILE_NAME);
+  if (!sessionId || !fs.existsSync(stateFile)) {
+    return;
+  }
+
+  const state = loadStateFromFile(stateFile);
+  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+  if (removedJobs.length === 0) {
+    return;
+  }
+
+  for (const job of removedJobs) {
+    removeFileIfExists(path.join(stateDir, JOBS_DIR_NAME, `${job.id}.json`));
+    removeFileIfExists(job.logFile);
+  }
+
+  const nextState = {
+    ...state,
+    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
+  };
+  fs.writeFileSync(stateFile, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
 }
 
 function pruneJobs(jobs) {

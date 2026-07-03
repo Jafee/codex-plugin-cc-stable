@@ -944,7 +944,7 @@ async function handleStatus(argv) {
           pollIntervalMs: options["poll-interval-ms"]
         })
       : buildSingleJobSnapshot(cwd, reference);
-    outputCommandResult(snapshot, renderJobStatusReport(snapshot.job), options.json);
+    outputCommandResult(snapshot, renderJobStatusReport(snapshot.job, { currentWorkspaceRoot: snapshot.workspaceRoot }), options.json);
     return;
   }
 
@@ -1022,7 +1022,9 @@ async function handleCancel(argv) {
   const threadId = existing.threadId ?? job.threadId ?? null;
   const turnId = existing.turnId ?? job.turnId ?? null;
 
-  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
+  // Interrupt via the job's own workspace: a session job from another
+  // workspace lives on that workspace's shared runtime, not this cwd's.
+  const interrupt = await interruptAppServerTurn(workspaceRoot, { threadId, turnId });
   if (interrupt.attempted) {
     appendLogLine(
       job.logFile,

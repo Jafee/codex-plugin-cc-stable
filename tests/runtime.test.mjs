@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import net from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -581,13 +582,16 @@ test("task --resume-last does not resume a task from another Claude session", ()
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
+  // Unique per run: session-scoped commands scan every workspace state dir
+  // under the shared state root, so a fixed id would resurface records this
+  // test's real CLI runs left behind in earlier suite executions.
   const otherEnv = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-other"
+    CODEX_COMPANION_SESSION_ID: `sess-other-${randomUUID()}`
   };
   const currentEnv = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-current"
+    CODEX_COMPANION_SESSION_ID: `sess-current-${randomUUID()}`
   };
 
   const firstRun = run("node", [SCRIPT, "task", "initial task"], {
@@ -653,7 +657,7 @@ test("task --resume-last ignores running tasks from other Claude sessions", () =
 
   const env = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-current"
+    CODEX_COMPANION_SESSION_ID: `sess-current-${randomUUID()}`
   };
   const status = run("node", [SCRIPT, "status", "--json"], {
     cwd: repo,
@@ -1232,6 +1236,264 @@ test("status without a job id only shows jobs from the current Claude session", 
   );
 });
 
+test("status and result surface session jobs registered in another workspace", () => {
+  const repoA = makeTempDir();
+  const repoB = makeTempDir();
+  const binDir = makeTempDir();
+  const sessionId = `sess-xwsp-${randomUUID()}`;
+  installFakeCodex(binDir, "slow-task");
+  initGitRepo(repoA);
+  initGitRepo(repoB);
+  const env = {
+    ...buildEnv(binDir),
+    CODEX_COMPANION_SESSION_ID: sessionId
+  };
+
+  // Launch the job the way a subagent does: from repo A, routed to repo B, so
+  // it registers under repo B's workspace state dir.
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "-C", repoB, "cross workspace probe"], {
+    cwd: repoA,
+    env
+  });
+  assert.equal(launched.status, 0, launched.stderr);
+  const jobId = JSON.parse(launched.stdout).jobId;
+
+  const waited = run("node", [SCRIPT, "status", jobId, "--wait", "--timeout-ms", "15000", "--json"], {
+    cwd: repoA,
+    env
+  });
+  assert.equal(waited.status, 0, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).job.status, "completed");
+
+  const status = run("node", [SCRIPT, "status"], { cwd: repoA, env });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, new RegExp(jobId));
+  assert.match(status.stdout, new RegExp(`Workspace: .*${path.basename(repoB)}`));
+
+  const result = run("node", [SCRIPT, "result", jobId, "--json"], { cwd: repoA, env });
+  assert.equal(result.status, 0, result.stderr);
+  const resultPayload = JSON.parse(result.stdout);
+  assert.equal(resultPayload.job.id, jobId);
+  assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
+
+  const noSession = run("node", [SCRIPT, "status"], { cwd: repoA, env: buildEnv(binDir) });
+  assert.equal(noSession.status, 0, noSession.stderr);
+  assert.doesNotMatch(noSession.stdout, new RegExp(jobId));
+
+  const otherSession = run("node", [SCRIPT, "status"], {
+    cwd: repoA,
+    env: { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: `sess-xwsp-${randomUUID()}` }
+  });
+  assert.equal(otherSession.status, 0, otherSession.stderr);
+  assert.doesNotMatch(otherSession.stdout, new RegExp(jobId));
+});
+
+test("cancel reaches a session job registered in another workspace", async (t) => {
+  const repoA = makeTempDir();
+  const workspaceB = makeTempDir();
+  const sessionId = `sess-xwsp-${randomUUID()}`;
+  const stateDir = resolveStateDir(workspaceB);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    cwd: workspaceB,
+    detached: true,
+    stdio: "ignore"
+  });
+  sleeper.unref();
+
+  t.after(() => {
+    try {
+      process.kill(-sleeper.pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(sleeper.pid, "SIGTERM");
+      } catch {
+        // Ignore missing process.
+      }
+    }
+  });
+
+  const logFile = path.join(jobsDir, "task-live-xwsp.log");
+  const jobFile = path.join(jobsDir, "task-live-xwsp.json");
+  fs.writeFileSync(logFile, "[2026-03-18T15:30:00.000Z] Starting Codex Task.\n", "utf8");
+  fs.writeFileSync(
+    jobFile,
+    JSON.stringify(
+      {
+        id: "task-live-xwsp",
+        status: "running",
+        title: "Codex Task",
+        workspaceRoot: workspaceB,
+        logFile
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-live-xwsp",
+            status: "running",
+            title: "Codex Task",
+            jobClass: "task",
+            sessionId,
+            workspaceRoot: workspaceB,
+            summary: "Investigate flaky test",
+            pid: sleeper.pid,
+            logFile,
+            createdAt: "2026-03-18T15:30:00.000Z",
+            startedAt: "2026-03-18T15:30:01.000Z",
+            updatedAt: "2026-03-18T15:30:02.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const cancelResult = run("node", [SCRIPT, "cancel", "task-live-xwsp", "--json"], {
+    cwd: repoA,
+    env: {
+      ...process.env,
+      CODEX_COMPANION_SESSION_ID: sessionId
+    }
+  });
+
+  assert.equal(cancelResult.status, 0, cancelResult.stderr);
+  assert.equal(JSON.parse(cancelResult.stdout).status, "cancelled");
+
+  await waitFor(() => {
+    try {
+      process.kill(sleeper.pid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  });
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const cancelled = state.jobs.find((job) => job.id === "task-live-xwsp");
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.pid, null);
+  assert.equal(JSON.parse(fs.readFileSync(jobFile, "utf8")).status, "cancelled");
+});
+
+test("session end sweeps session jobs registered in another workspace", async (t) => {
+  const repoA = makeTempDir();
+  const workspaceB = makeTempDir();
+  const sessionId = `sess-xwsp-${randomUUID()}`;
+  const stateDir = resolveStateDir(workspaceB);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    cwd: workspaceB,
+    detached: true,
+    stdio: "ignore"
+  });
+  sleeper.unref();
+
+  t.after(() => {
+    try {
+      process.kill(-sleeper.pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(sleeper.pid, "SIGTERM");
+      } catch {
+        // Ignore missing process.
+      }
+    }
+  });
+
+  const runningLog = path.join(jobsDir, "task-xwsp-running.log");
+  const runningJobFile = path.join(jobsDir, "task-xwsp-running.json");
+  const otherLog = path.join(jobsDir, "task-xwsp-other.log");
+  const otherJobFile = path.join(jobsDir, "task-xwsp-other.json");
+  fs.writeFileSync(runningLog, "running\n", "utf8");
+  fs.writeFileSync(otherLog, "other\n", "utf8");
+  fs.writeFileSync(runningJobFile, JSON.stringify({ id: "task-xwsp-running" }, null, 2), "utf8");
+  fs.writeFileSync(otherJobFile, JSON.stringify({ id: "task-xwsp-other" }, null, 2), "utf8");
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-xwsp-running",
+            status: "running",
+            title: "Codex Task",
+            jobClass: "task",
+            sessionId,
+            workspaceRoot: workspaceB,
+            pid: sleeper.pid,
+            logFile: runningLog,
+            createdAt: "2026-03-18T15:30:00.000Z",
+            updatedAt: "2026-03-18T15:31:00.000Z"
+          },
+          {
+            id: "task-xwsp-other",
+            status: "completed",
+            title: "Codex Task",
+            jobClass: "task",
+            sessionId: "sess-other",
+            workspaceRoot: workspaceB,
+            logFile: otherLog,
+            createdAt: "2026-03-18T15:32:00.000Z",
+            updatedAt: "2026-03-18T15:33:00.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const result = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repoA,
+    env: {
+      ...process.env,
+      CODEX_COMPANION_SESSION_ID: sessionId
+    },
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      session_id: sessionId,
+      cwd: repoA
+    })
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+
+  await waitFor(() => {
+    try {
+      process.kill(sleeper.pid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  });
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  assert.deepEqual(state.jobs.map((job) => job.id), ["task-xwsp-other"]);
+  assert.equal(fs.existsSync(runningJobFile), false);
+  assert.equal(fs.existsSync(runningLog), false);
+  assert.equal(fs.existsSync(otherJobFile), true);
+  assert.equal(fs.existsSync(otherLog), true);
+});
+
 test("status preserves adversarial review kind labels", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
@@ -1418,6 +1680,7 @@ test("result returns the stored output for the latest finished job by default", 
 
 test("result without a job id prefers the latest finished job from the current Claude session", () => {
   const workspace = makeTempDir();
+  const sessionId = `sess-current-${randomUUID()}`;
   const stateDir = resolveStateDir(workspace);
   const jobsDir = path.join(stateDir, "jobs");
   fs.mkdirSync(jobsDir, { recursive: true });
@@ -1474,7 +1737,7 @@ test("result without a job id prefers the latest finished job from the current C
             status: "completed",
             title: "Codex Review",
             jobClass: "review",
-            sessionId: "sess-current",
+            sessionId,
             threadId: "thr_current",
             summary: "Current session review",
             createdAt: "2026-03-18T15:10:00.000Z",
@@ -1503,7 +1766,7 @@ test("result without a job id prefers the latest finished job from the current C
     cwd: workspace,
     env: {
       ...process.env,
-      CODEX_COMPANION_SESSION_ID: "sess-current"
+      CODEX_COMPANION_SESSION_ID: sessionId
     }
   });
 
@@ -1670,7 +1933,7 @@ test("cancel without a job id ignores active jobs from other Claude sessions", (
 
   const env = {
     ...process.env,
-    CODEX_COMPANION_SESSION_ID: "sess-current"
+    CODEX_COMPANION_SESSION_ID: `sess-current-${randomUUID()}`
   };
   const status = run("node", [SCRIPT, "status", "--json"], {
     cwd: workspace,
@@ -1804,6 +2067,10 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
 
 test("session end fully cleans up jobs for the ending session", async (t) => {
   const repo = makeTempDir();
+  // Unique per run: SessionEnd sweeps every workspace state dir for this
+  // session id and kills recorded pids, so a fixed id could reach stale
+  // records left under the shared state root by earlier suite executions.
+  const sessionId = `sess-current-${randomUUID()}`;
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
   run("git", ["add", "README.md"], { cwd: repo });
@@ -1856,7 +2123,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
             id: "review-completed",
             status: "completed",
             title: "Codex Review",
-            sessionId: "sess-current",
+            sessionId,
             logFile: completedLog,
             createdAt: "2026-03-18T15:30:00.000Z",
             updatedAt: "2026-03-18T15:31:00.000Z"
@@ -1865,7 +2132,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
             id: "review-running",
             status: "running",
             title: "Codex Review",
-            sessionId: "sess-current",
+            sessionId,
             pid: sleeper.pid,
             logFile: runningLog,
             createdAt: "2026-03-18T15:32:00.000Z",
@@ -1892,11 +2159,11 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
     cwd: repo,
     env: {
       ...process.env,
-      CODEX_COMPANION_SESSION_ID: "sess-current"
+      CODEX_COMPANION_SESSION_ID: sessionId
     },
     input: JSON.stringify({
       hook_event_name: "SessionEnd",
-      session_id: "sess-current",
+      session_id: sessionId,
       cwd: repo
     })
   });
