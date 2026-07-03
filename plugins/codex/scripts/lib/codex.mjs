@@ -807,16 +807,31 @@ function importedThreadIdForSource(sourcePath) {
   if (!fs.existsSync(ledgerPath)) {
     return null;
   }
-  const ledger = readJsonFile(ledgerPath);
-  const canonicalSource = fs.realpathSync(sourcePath);
+  let canonicalSource;
+  try {
+    canonicalSource = fs.realpathSync(sourcePath);
+  } catch {
+    // A source file that vanished mid-transfer should surface as the
+    // caller's "did not record an imported thread" guidance, not as a bare
+    // ENOENT error.
+    return null;
+  }
   if (canonicalSource !== sourcePath) {
     // sourcePath arrives canonical, already validated to live under
     // ~/.claude/projects. Re-resolving somewhere else means the file was
     // swapped after validation; treat the import as unrecorded rather than
-    // hash (and match) whatever the new target points at.
+    // read (and match) whatever the new target points at.
     return null;
   }
-  const contentSha256 = sourceContentSha256(canonicalSource);
+  let ledger;
+  let contentSha256;
+  try {
+    ledger = readJsonFile(ledgerPath);
+    contentSha256 = sourceContentSha256(canonicalSource);
+  } catch {
+    // Same guidance for a corrupt ledger.
+    return null;
+  }
   const records = Array.isArray(ledger?.records) ? ledger.records : [];
   const match = records
     .filter(

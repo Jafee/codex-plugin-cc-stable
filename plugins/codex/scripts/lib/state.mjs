@@ -83,6 +83,13 @@ export function loadState(cwd) {
   return loadStateFromFile(resolveStateFile(cwd));
 }
 
+// A scanned state.json may be foreign or hand-edited; a non-object entry in
+// jobs (e.g. null) must not throw and take down the whole session scan — the
+// SessionEnd hook would then also skip broker teardown.
+function isSessionJob(job, sessionId) {
+  return Boolean(job) && typeof job === "object" && job.sessionId === sessionId;
+}
+
 // Jobs are registered under the state dir of the workspace they run in
 // (resolveStateDir keys by workspace root), so a job launched with
 // -C <another-workspace> — e.g. by a subagent working in a worktree — is
@@ -109,7 +116,7 @@ export function listSessionJobGroups(sessionId) {
     }
     const stateDir = path.join(stateRoot, entry.name);
     const state = loadStateFromFile(path.join(stateDir, STATE_FILE_NAME));
-    const jobs = state.jobs.filter((job) => job.sessionId === sessionId);
+    const jobs = state.jobs.filter((job) => isSessionJob(job, sessionId));
     if (jobs.length > 0) {
       groups.push({ stateDir, jobs });
     }
@@ -127,7 +134,7 @@ export function removeSessionJobsFromStateDir(stateDir, sessionId) {
   }
 
   const state = loadStateFromFile(stateFile);
-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+  const removedJobs = state.jobs.filter((job) => isSessionJob(job, sessionId));
   if (removedJobs.length === 0) {
     return;
   }
@@ -139,7 +146,7 @@ export function removeSessionJobsFromStateDir(stateDir, sessionId) {
 
   const nextState = {
     ...state,
-    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
+    jobs: state.jobs.filter((job) => !isSessionJob(job, sessionId))
   };
   fs.writeFileSync(stateFile, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
 }

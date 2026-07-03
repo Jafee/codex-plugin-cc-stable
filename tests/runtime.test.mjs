@@ -305,6 +305,41 @@ test("transfer fails visibly when native import completes without a ledger recor
   assert.match(result.stderr, /did not record an imported thread/);
 });
 
+test("transfer reports the unrecorded-import guidance when the ledger is corrupt", () => {
+  const home = makeTempDir();
+  const repo = path.join(home, "repo");
+  const binDir = makeTempDir();
+  const codexHome = path.join(home, ".codex");
+  const projectDir = path.join(home, ".claude", "projects", "-repo");
+  const sourcePath = path.join(projectDir, "session.jsonl");
+  fs.mkdirSync(repo, { recursive: true });
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(codexHome, { recursive: true });
+  // The fake codex skips the ledger entirely in this mode, so the corrupt
+  // file below only exercises the companion's own ledger read.
+  installFakeCodex(binDir, "external-import-fails");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(codexHome, "external_agent_session_imports.json"), "{not json", "utf8");
+  fs.writeFileSync(
+    sourcePath,
+    `${JSON.stringify({ type: "user", cwd: repo, message: { role: "user", content: "Ledger went bad." } })}\n`,
+    "utf8"
+  );
+
+  const result = run("node", [SCRIPT, "transfer", "--source", sourcePath], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      HOME: home,
+      CODEX_HOME: codexHome
+    }
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /did not record an imported thread/);
+  assert.doesNotMatch(result.stderr, /JSON/);
+});
+
 test("transfer rejects sources outside the Claude projects directory", () => {
   const home = makeTempDir();
   const repo = path.join(home, "repo");
@@ -1286,6 +1321,52 @@ test("status and result surface session jobs registered in another workspace", (
   });
   assert.equal(otherSession.status, 0, otherSession.stderr);
   assert.doesNotMatch(otherSession.stdout, new RegExp(jobId));
+});
+
+test("the cross-workspace session scan tolerates corrupt job entries", () => {
+  const repoA = makeTempDir();
+  const workspaceB = makeTempDir();
+  const sessionId = `sess-xwsp-${randomUUID()}`;
+  const stateDir = resolveStateDir(workspaceB);
+  fs.mkdirSync(path.join(stateDir, "jobs"), { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          null,
+          "garbage",
+          {
+            id: "task-xwsp-alive",
+            status: "completed",
+            title: "Codex Task",
+            jobClass: "task",
+            sessionId,
+            workspaceRoot: workspaceB,
+            summary: "Survives corrupt neighbours",
+            createdAt: "2026-03-18T15:30:00.000Z",
+            updatedAt: "2026-03-18T15:31:00.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const status = run("node", [SCRIPT, "status"], {
+    cwd: repoA,
+    env: {
+      ...process.env,
+      CODEX_COMPANION_SESSION_ID: sessionId
+    }
+  });
+
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /task-xwsp-alive/);
 });
 
 test("cancel reaches a session job registered in another workspace", async (t) => {
