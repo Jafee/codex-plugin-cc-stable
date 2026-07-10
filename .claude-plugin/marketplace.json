@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Privately maintained stable fork of the OpenAI Codex plugins for Claude Code (delegation and code review).",
-    "version": "100.0.5"
+    "version": "100.0.6"
   },
   "plugins": [
     {
       "name": "codex-stable",
       "description": "Use Codex from Claude Code to review code or delegate tasks (stable fork).",
-      "version": "100.0.5",
+      "version": "100.0.6",
       "author": {
         "name": "OpenAI"
       },
