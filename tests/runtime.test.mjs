@@ -1686,7 +1686,8 @@ test("status --wait times out cleanly when a job is still active", () => {
   );
 
   const result = run("node", [SCRIPT, "status", "task-live", "--wait", "--timeout-ms", "25", "--json"], {
-    cwd: workspace
+    cwd: workspace,
+    env: { ...process.env, CODEX_COMPANION_STATUS_WAIT_TIMEOUT_MS: "999" }
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -1694,6 +1695,7 @@ test("status --wait times out cleanly when a job is still active", () => {
   assert.equal(payload.job.id, "task-live");
   assert.equal(payload.job.status, "running");
   assert.equal(payload.waitTimedOut, true);
+  assert.equal(payload.timeoutMs, 25);
 });
 
 test("status --wait uses the timeout from the environment", () => {
