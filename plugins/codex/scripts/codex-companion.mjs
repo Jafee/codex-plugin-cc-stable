@@ -7,6 +7,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { resolveTimeoutMs } from "./lib/app-server.mjs";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import {
     buildPersistentTaskThreadName,
@@ -351,7 +352,7 @@ function findLatestResumableTaskJob(jobs) {
 }
 
 async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
-  const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
+  const timeoutMs = Math.max(0, Number(options.timeoutMs) || resolveTimeoutMs("CODEX_COMPANION_STATUS_WAIT_TIMEOUT_MS", DEFAULT_STATUS_WAIT_TIMEOUT_MS));
   const pollIntervalMs = Math.max(100, Number(options.pollIntervalMs) || DEFAULT_STATUS_POLL_INTERVAL_MS);
   const deadline = Date.now() + timeoutMs;
   let snapshot = buildSingleJobSnapshot(cwd, reference);

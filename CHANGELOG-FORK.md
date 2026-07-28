@@ -25,6 +25,7 @@
 
 **已合入**(均经 Opus + Codex 双重安全审计:9 条红线全清、0 安全发现):
 
+- `feat`: `status --wait` 支持用 `CODEX_COMPANION_STATUS_WAIT_TIMEOUT_MS` 覆盖默认 240s 等待超时,显式 `--timeout-ms` 仍优先
 - `docs`: 添加 fork 维护计划(`IMPLEMENTATION_PLAN.md`)与本说明 — `71e17e8`
 - `security`: 修复 untracked 文件 symlink 逃逸导致的凭据泄露(`lib/git.mjs`,`realpathSync` 限定 workspace 内)— `487b54d`,边界测试/TOCTOU 标注 `138958e`。Opus 设计+验证,Codex 独立复审 NEEDS_DISCUSSION(**无安全阻断**;TOCTOU 残余需本机并发执行能力、在威胁模型外,已诚实标注)
 - #300 `fix`: broker shutdown 加 wall-clock timeout,broker 接受连接却不回复时不再无限挂 — `357893b`
